@@ -100,13 +100,37 @@ def render_image_card(img: Image.Image, caption: str = ""):
     )
 
 
-@st.cache_data(show_spinner=False, ttl=120, max_entries=24)
-def get_related_outfit_count(customer_id: str, part: str, garment_id_str: str) -> int:
+@st.cache_data(show_spinner=False, ttl=120, max_entries=12)
+def get_related_outfit_counts_for_page(customer_id: str, garment_refs: tuple):
     _client, db, _fs = mongo()
-    field = {"shirt": "shirt_id", "pants": "pants_id", "shoes": "shoes_id"}.get(part)
-    if not field:
-        return 0
-    return int(db["Outfits"].count_documents({"customer_id": customer_id, field: garment_id_str}))
+    counts = {}
+
+    shirt_ids = [gid for part, gid in garment_refs if part == "shirt"]
+    pants_ids = [gid for part, gid in garment_refs if part == "pants"]
+    shoes_ids = [gid for part, gid in garment_refs if part == "shoes"]
+
+    if shirt_ids:
+        for row in db["Outfits"].aggregate([
+            {"$match": {"customer_id": customer_id, "shirt_id": {"$in": shirt_ids}}},
+            {"$group": {"_id": "$shirt_id", "count": {"$sum": 1}}},
+        ]):
+            counts[("shirt", str(row["_id"]))] = int(row["count"])
+
+    if pants_ids:
+        for row in db["Outfits"].aggregate([
+            {"$match": {"customer_id": customer_id, "pants_id": {"$in": pants_ids}}},
+            {"$group": {"_id": "$pants_id", "count": {"$sum": 1}}},
+        ]):
+            counts[("pants", str(row["_id"]))] = int(row["count"])
+
+    if shoes_ids:
+        for row in db["Outfits"].aggregate([
+            {"$match": {"customer_id": customer_id, "shoes_id": {"$in": shoes_ids}}},
+            {"$group": {"_id": "$shoes_id", "count": {"$sum": 1}}},
+        ]):
+            counts[("shoes", str(row["_id"]))] = int(row["count"])
+
+    return counts
 
 
 @st.cache_data(show_spinner=False, ttl=120, max_entries=12)
@@ -200,6 +224,10 @@ except Exception as e:
         st.caption(str(e))
     st.stop()
 
+delete_toast = st.session_state.pop("delete_garment_toast", None)
+if delete_toast:
+    st.toast(delete_toast, icon="✅")
+
 f1, f2 = st.columns([1, 1])
 with f1:
     part_filter = st.selectbox("Garment type", ["all", "shirt", "pants", "shoes"], key="delete_part_filter")
@@ -227,6 +255,8 @@ with pcol2:
     st.caption(f"Showing {start_idx}-{end_idx} of {total_count} garment(s)")
 
 total_count, garments = get_garments_page(customer_id, part_filter, page_num, page_size)
+garment_refs = tuple((str(g.get("part")), str(g.get("_id"))) for g in garments)
+ref_counts = get_related_outfit_counts_for_page(customer_id, garment_refs) if garments else {}
 
 if not garments:
     st.markdown('<div class="page-shell card"><p class="muted" style="margin:0;">No garments found for this filter.</p></div>', unsafe_allow_html=True)
@@ -255,7 +285,7 @@ for g in garments:
         )
 
     with c3:
-        ref_count = get_related_outfit_count(customer_id, g.get("part"), str(g["_id"]))
+        ref_count = int(ref_counts.get((str(g.get("part")), str(g["_id"])), 0))
         st.markdown(
             f"""
 <div class="card">
@@ -272,7 +302,9 @@ for g in garments:
                 st.error("Please confirm deletion first.")
             else:
                 deleted_outfits = delete_garment_and_related_outfits(db, fs, customer_id, g)
-                st.success(f"Garment deleted. Removed {deleted_outfits} related outfit(s).")
+                st.session_state["delete_garment_toast"] = (
+                    f"Deleted successfully. Removed {deleted_outfits} related outfit(s)."
+                )
                 st.rerun()
 
     st.divider()

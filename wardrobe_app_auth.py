@@ -2177,6 +2177,9 @@ with tab4:
 # ---- TAB 5
 with tab5:
     st.subheader("Saved outfits")
+    delete_outfit_toast = st.session_state.pop("delete_outfit_toast", None)
+    if delete_outfit_toast:
+        st.toast(delete_outfit_toast, icon="✅")
 
     # filters (score + styles)
     c1, c2 = st.columns([1, 2])
@@ -2185,7 +2188,21 @@ with tab5:
     with c2:
         saved_style_filter = st.multiselect("Filter saved by styles (optional)", TAG_OPTIONS, default=[], key="saved_style_filter")
 
-    saved_raw = list(db["Outfits"].find({"customer_id": customer_id}).sort("created_at", -1).limit(500))
+    saved_raw = list(
+        db["Outfits"].find(
+            {"customer_id": customer_id},
+            {
+                "_id": 1,
+                "shirt_id": 1,
+                "pants_id": 1,
+                "shoes_id": 1,
+                "score": 1,
+                "tags": 1,
+                "source": 1,
+                "created_at": 1,
+            },
+        ).sort("created_at", -1).limit(500)
+    )
 
     # de-dup by combo
     seen = set()
@@ -2216,18 +2233,39 @@ with tab5:
     else:
         st.write(f"Saved (filtered): {len(filtered)}")
 
+        garment_ids = set()
+        for o in filtered:
+            for gid in (o.get("shirt_id"), o.get("pants_id"), o.get("shoes_id")):
+                if gid:
+                    garment_ids.add(str(gid))
+
+        wardrobe_docs = {}
+        if garment_ids:
+            oid_list = []
+            for gid in garment_ids:
+                try:
+                    oid_list.append(ObjectId(gid))
+                except Exception:
+                    continue
+            if oid_list:
+                for d in db["Wardrobe"].find({"_id": {"$in": oid_list}}, {"_id": 1, "image_fs_id": 1}):
+                    wardrobe_docs[str(d["_id"])] = d
+
         for o in filtered:
             # delete button (per outfit doc)
             del_col, _ = st.columns([1, 6])
             with del_col:
                 if st.button("🗑️ Delete", key=f"del_{o.get('_id')}"):
-                    db["Outfits"].delete_one({"_id": o["_id"], "customer_id": customer_id})
-                    st.toast("Deleted")
+                    deleted = db["Outfits"].delete_one({"_id": o["_id"], "customer_id": customer_id}).deleted_count
+                    if deleted:
+                        st.session_state["delete_outfit_toast"] = "Deleted successfully."
+                    else:
+                        st.session_state["delete_outfit_toast"] = "Item was already deleted."
                     st.rerun()
 
-            s_doc = get_garment_by_id(db, o.get("shirt_id"))
-            p_doc = get_garment_by_id(db, o.get("pants_id"))
-            f_doc = get_garment_by_id(db, o.get("shoes_id"))
+            s_doc = wardrobe_docs.get(str(o.get("shirt_id")))
+            p_doc = wardrobe_docs.get(str(o.get("pants_id")))
+            f_doc = wardrobe_docs.get(str(o.get("shoes_id")))
             if not (s_doc and p_doc and f_doc):
                 st.warning("This saved outfit references a missing garment. Skipping display.")
                 continue
