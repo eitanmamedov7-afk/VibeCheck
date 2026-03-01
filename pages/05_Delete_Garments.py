@@ -1,4 +1,4 @@
-﻿import base64
+import base64
 import io
 import os
 
@@ -51,36 +51,30 @@ def mongo():
     db_name = get_config_value("MONGO_DB", "Wardrobe_db") or "Wardrobe_db"
     if not uri:
         raise RuntimeError("Missing MONGO_URI in Streamlit secrets or .env")
+
+    print("[VibeCheck] Connecting Mongo client for Delete Garments page (cached)")
     client = MongoClient(
         uri,
-        serverSelectionTimeoutMS=12000,
-        connectTimeoutMS=12000,
-        socketTimeoutMS=12000,
+        serverSelectionTimeoutMS=8000,
+        connectTimeoutMS=8000,
+        socketTimeoutMS=8000,
     )
     db = client[db_name]
     db.command("ping")
     fs = gridfs.GridFS(db)
-    return db, fs
+    return client, db, fs
 
 
-@st.cache_data(show_spinner=False)
-def fs_get_bytes(uri: str, db_name: str, file_id_str: str) -> bytes:
-    client = MongoClient(
-        uri,
-        serverSelectionTimeoutMS=12000,
-        connectTimeoutMS=12000,
-        socketTimeoutMS=12000,
-    )
-    db = client[db_name]
-    fs = gridfs.GridFS(db)
+@st.cache_data(show_spinner=False, ttl=900, max_entries=64)
+def fs_get_bytes(file_id_str: str) -> bytes:
+    _client, _db, fs = mongo()
     return fs.get(ObjectId(file_id_str)).read()
 
 
 def get_image_from_fs(file_id_str: str) -> Image.Image:
-    uri = get_config_value("MONGO_URI", "")
-    db_name = get_config_value("MONGO_DB", "Wardrobe_db") or "Wardrobe_db"
-    data = fs_get_bytes(uri, db_name, file_id_str)
-    return Image.open(io.BytesIO(data))
+    data = fs_get_bytes(file_id_str)
+    with Image.open(io.BytesIO(data)) as img:
+        return img.convert("RGBA")
 
 
 def image_to_png_bytes(img: Image.Image) -> bytes:
@@ -106,6 +100,43 @@ def render_image_card(img: Image.Image, caption: str = ""):
     )
 
 
+@st.cache_data(show_spinner=False, ttl=120, max_entries=24)
+def get_related_outfit_count(customer_id: str, part: str, garment_id_str: str) -> int:
+    _client, db, _fs = mongo()
+    field = {"shirt": "shirt_id", "pants": "pants_id", "shoes": "shoes_id"}.get(part)
+    if not field:
+        return 0
+    return int(db["Outfits"].count_documents({"customer_id": customer_id, field: garment_id_str}))
+
+
+@st.cache_data(show_spinner=False, ttl=120, max_entries=12)
+def get_garments_page(customer_id: str, part_filter: str, page_num: int, page_size: int):
+    _client, db, _fs = mongo()
+
+    q = {"customer_id": customer_id}
+    if part_filter != "all":
+        q["part"] = part_filter
+
+    total = int(db["Wardrobe"].count_documents(q))
+    skip = max(0, (int(page_num) - 1) * int(page_size))
+
+    projection = {
+        "_id": 1,
+        "part": 1,
+        "tags": 1,
+        "created_at": 1,
+        "image_fs_id": 1,
+    }
+    docs = list(
+        db["Wardrobe"]
+        .find(q, projection)
+        .sort("created_at", -1)
+        .skip(skip)
+        .limit(int(page_size))
+    )
+    return total, docs
+
+
 def delete_garment_and_related_outfits(db, fs, customer_id: str, garment_doc: dict):
     part = garment_doc.get("part")
     gid = str(garment_doc.get("_id"))
@@ -124,6 +155,7 @@ def delete_garment_and_related_outfits(db, fs, customer_id: str, garment_doc: di
         except Exception:
             pass
 
+    st.cache_data.clear()
     return deleted_outfits
 
 
@@ -148,8 +180,9 @@ if auth_user is None:
 
 customer_id = str(auth_user["_id"])
 
+st.caption("Connecting to DB (cached)")
 try:
-    db, fs = mongo()
+    _mongo_client, db, fs = mongo()
 except Exception as e:
     st.error("MongoDB connection failed.")
     st.caption(f"Error type: {type(e).__name__}")
@@ -171,18 +204,34 @@ f1, f2 = st.columns([1, 1])
 with f1:
     part_filter = st.selectbox("Garment type", ["all", "shirt", "pants", "shoes"], key="delete_part_filter")
 with f2:
-    limit = st.slider("Items shown", 10, 200, 40, 10, key="delete_limit")
+    page_size = st.slider("Items shown", 10, 200, 40, 10, key="delete_limit")
 
-q = {"customer_id": customer_id}
-if part_filter != "all":
-    q["part"] = part_filter
+total_count, _ = get_garments_page(customer_id, part_filter, 1, page_size)
+total_pages = max(1, (total_count + page_size - 1) // page_size)
 
-garments = list(db["Wardrobe"].find(q).sort("created_at", -1).limit(int(limit)))
+pcol1, pcol2 = st.columns([1, 3])
+with pcol1:
+    page_num = int(
+        st.number_input(
+            "Page",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1,
+            key="delete_page_num",
+        )
+    )
+with pcol2:
+    start_idx = (page_num - 1) * page_size + 1 if total_count > 0 else 0
+    end_idx = min(total_count, page_num * page_size)
+    st.caption(f"Showing {start_idx}-{end_idx} of {total_count} garment(s)")
+
+total_count, garments = get_garments_page(customer_id, part_filter, page_num, page_size)
 
 if not garments:
     st.markdown('<div class="page-shell card"><p class="muted" style="margin:0;">No garments found for this filter.</p></div>', unsafe_allow_html=True)
 else:
-    st.caption(f"{len(garments)} garment(s)")
+    st.caption(f"{len(garments)} garment(s) on this page")
 
 for g in garments:
     c1, c2, c3 = st.columns([1.2, 1.6, 1.2], gap="large")
@@ -206,8 +255,7 @@ for g in garments:
         )
 
     with c3:
-        field = {"shirt": "shirt_id", "pants": "pants_id", "shoes": "shoes_id"}.get(g.get("part"))
-        ref_count = db["Outfits"].count_documents({"customer_id": customer_id, field: str(g["_id"])}) if field else 0
+        ref_count = get_related_outfit_count(customer_id, g.get("part"), str(g["_id"]))
         st.markdown(
             f"""
 <div class="card">
