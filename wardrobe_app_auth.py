@@ -1,8 +1,9 @@
-import io
+﻿import io
 import os
 import random
 import uuid
 import importlib.util
+import types
 from datetime import datetime, timezone
 from pathlib import Path
 import base64
@@ -34,36 +35,49 @@ import joblib
 
 def _import_local_human_parser():
     local_pkg_dir = Path(__file__).resolve().parent / "fashn_human_parser"
-    init_py = local_pkg_dir / "__init__.py"
-    if not init_py.exists():
-        raise RuntimeError(f"Local parser module not found at {init_py}")
+    parser_py = local_pkg_dir / "parser.py"
+    labels_py = local_pkg_dir / "labels.py"
+    if not parser_py.exists() or not labels_py.exists():
+        raise RuntimeError(f"Local parser files missing under {local_pkg_dir}")
 
-    spec = importlib.util.spec_from_file_location(
-        "fashn_human_parser_local",
-        str(init_py),
-        submodule_search_locations=[str(local_pkg_dir)],
-    )
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Failed to construct import spec for local parser module.")
+    pkg_name = "fashn_human_parser_localpkg"
+    pkg = types.ModuleType(pkg_name)
+    pkg.__path__ = [str(local_pkg_dir)]
+    sys.modules[pkg_name] = pkg
 
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module.FashnHumanParser, module.LABELS_TO_IDS
+    labels_name = f"{pkg_name}.labels"
+    labels_spec = importlib.util.spec_from_file_location(labels_name, str(labels_py))
+    if labels_spec is None or labels_spec.loader is None:
+        raise RuntimeError("Failed to construct labels import spec.")
+    labels_mod = importlib.util.module_from_spec(labels_spec)
+    sys.modules[labels_name] = labels_mod
+    labels_spec.loader.exec_module(labels_mod)
+
+    parser_name = f"{pkg_name}.parser"
+    parser_spec = importlib.util.spec_from_file_location(parser_name, str(parser_py))
+    if parser_spec is None or parser_spec.loader is None:
+        raise RuntimeError("Failed to construct parser import spec.")
+    parser_mod = importlib.util.module_from_spec(parser_spec)
+    sys.modules[parser_name] = parser_mod
+    parser_spec.loader.exec_module(parser_mod)
+
+    return parser_mod.FashnHumanParser, labels_mod.LABELS_TO_IDS
 
 
 try:
-    from fashn_human_parser import FashnHumanParser, LABELS_TO_IDS
+    # Prefer the local cv2-free parser module from this repository.
+    FashnHumanParser, LABELS_TO_IDS = _import_local_human_parser()
     PARSER_IMPORT_ERROR = None
-except Exception as e:
+    print("[VibeCheck] Using local fashn_human_parser module.")
+except Exception as local_e:
     try:
-        FashnHumanParser, LABELS_TO_IDS = _import_local_human_parser()
+        from fashn_human_parser import FashnHumanParser, LABELS_TO_IDS
         PARSER_IMPORT_ERROR = None
-        print("[VibeCheck] Using local fashn_human_parser fallback module.")
-    except Exception:
+        print("[VibeCheck] Using installed fashn_human_parser package.")
+    except Exception as pkg_e:
         FashnHumanParser = None
         LABELS_TO_IDS = {}
-        PARSER_IMPORT_ERROR = e
+        PARSER_IMPORT_ERROR = local_e if local_e is not None else pkg_e
 
 
 # =========================
@@ -2203,7 +2217,3 @@ with tab5:
     st.caption("Garment deletion moved to a separate page for cleaner workflow.")
     legal_page_link("pages/05_Delete_Garments.py", "Open Delete Garments page")
     
-
-
-
-
