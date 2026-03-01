@@ -1,11 +1,14 @@
-﻿import io
+import io
 import os
 import random
+import uuid
+import importlib.util
 from datetime import datetime, timezone
 from pathlib import Path
 import base64
 import hashlib
 from contextlib import contextmanager
+import sys
 
 import numpy as np
 from PIL import Image
@@ -29,13 +32,38 @@ import torch.nn as nn
 from torchvision import models, transforms
 import joblib
 
+def _import_local_human_parser():
+    local_pkg_dir = Path(__file__).resolve().parent / "fashn_human_parser"
+    init_py = local_pkg_dir / "__init__.py"
+    if not init_py.exists():
+        raise RuntimeError(f"Local parser module not found at {init_py}")
+
+    spec = importlib.util.spec_from_file_location(
+        "fashn_human_parser_local",
+        str(init_py),
+        submodule_search_locations=[str(local_pkg_dir)],
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Failed to construct import spec for local parser module.")
+
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.FashnHumanParser, module.LABELS_TO_IDS
+
+
 try:
     from fashn_human_parser import FashnHumanParser, LABELS_TO_IDS
     PARSER_IMPORT_ERROR = None
 except Exception as e:
-    FashnHumanParser = None
-    LABELS_TO_IDS = {}
-    PARSER_IMPORT_ERROR = e
+    try:
+        FashnHumanParser, LABELS_TO_IDS = _import_local_human_parser()
+        PARSER_IMPORT_ERROR = None
+        print("[VibeCheck] Using local fashn_human_parser fallback module.")
+    except Exception:
+        FashnHumanParser = None
+        LABELS_TO_IDS = {}
+        PARSER_IMPORT_ERROR = e
 
 
 # =========================
@@ -89,6 +117,77 @@ def get_config_value(key: str, default: str = "") -> str:
         env_val = env_val.strip()
     return env_val
 
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def get_memory_mb():
+    try:
+        import resource
+
+        rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if sys.platform == "darwin":
+            return float(rss) / (1024.0 * 1024.0)
+        return float(rss) / 1024.0
+    except Exception:
+        return None
+
+
+PENDING_DIR = Path("work/_pending")
+
+
+def ensure_pending_dir() -> Path:
+    PENDING_DIR.mkdir(parents=True, exist_ok=True)
+    return PENDING_DIR
+
+
+def make_pending_token(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex}"
+
+
+def save_pending_image(token: str, name: str, img: Image.Image) -> str:
+    out = ensure_pending_dir() / f"{token}_{name}.png"
+    img.convert("RGBA").save(out, format="PNG")
+    return str(out)
+
+
+def save_pending_embedding(token: str, name: str, emb: np.ndarray) -> str:
+    out = ensure_pending_dir() / f"{token}_{name}.npy"
+    np.save(out, emb.astype(np.float32), allow_pickle=False)
+    return str(out)
+
+
+def load_rgba_from_path(path: str) -> Image.Image:
+    with Image.open(path) as im:
+        return im.convert("RGBA")
+
+
+def cleanup_paths(paths: list[str]):
+    for p in paths:
+        try:
+            Path(p).unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def cleanup_pending_outfit_payload(payload: dict | None):
+    if not payload:
+        return
+    paths = []
+    paths.extend((payload.get("cut_img_paths") or {}).values())
+    paths.extend((payload.get("emb_paths") or {}).values())
+    cleanup_paths(paths)
+
+
+def cleanup_pending_single_payload(payload: dict | None):
+    if not payload:
+        return
+    paths = []
+    if payload.get("img_path"):
+        paths.append(payload["img_path"])
+    if payload.get("emb_path"):
+        paths.append(payload["emb_path"])
+    cleanup_paths(paths)
 
 # =========================
 # UI STYLE
@@ -526,8 +625,9 @@ def remember_upload_sha(db, customer_id: str, sha: str, kind: str, filename: str
         "sha256": sha,
         "kind": kind,
         "filename": filename,
-        "created_at": datetime.utcnow(),
+        "created_at": now_utc(),
     })
+    st.cache_data.clear()
 
 def bordered_image(img: Image.Image, score: float = None, caption: str = "", max_width: int = 520):
     # IMPORTANT: keep alpha if exists (no forced RGB) so background is NEVER white
@@ -634,8 +734,9 @@ def load_models():
     if not Path(MODEL_MLP_PATH).exists():
         raise RuntimeError(f"Missing MLP file: {MODEL_MLP_PATH}")
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    parser = FashnHumanParser() if FashnHumanParser is not None else None
+    print("[VibeCheck] Loading ML assets into cache (CPU)")
+    device = "cpu"
+    parser = FashnHumanParser(device="cpu") if FashnHumanParser is not None else None
 
     resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
     resnet.fc = nn.Identity()
@@ -667,14 +768,14 @@ def load_models():
     return device, parser, resnet, preprocess, ipca, mlp
 
 
-@torch.no_grad()
+@torch.inference_mode()
 def emb_from_pil(pil_img: Image.Image, device: str, resnet: nn.Module, preprocess) -> np.ndarray:
     img = pil_rgba_to_rgb_on_white(pil_img)  # model input only
     x = preprocess(img).unsqueeze(0).to(device)
     e = resnet(x).squeeze(0).detach().cpu().numpy().astype(np.float32)
     return l2(e)
 
-@torch.no_grad()
+@torch.inference_mode()
 def score_from_parts(shirt: np.ndarray, pants: np.ndarray, shoes: np.ndarray, ipca, mlp, device: str) -> float:
     fused = np.concatenate([shirt, pants, shoes]).astype(np.float32)
     fused = l2(fused)
@@ -696,11 +797,12 @@ def mongo():
     if not uri:
         raise RuntimeError("Missing MONGO_URI in Streamlit secrets or .env")
 
+    print("[VibeCheck] Connecting Mongo client (cached)")
     client = MongoClient(
         uri,
-        serverSelectionTimeoutMS=12000,
-        connectTimeoutMS=12000,
-        socketTimeoutMS=12000,
+        serverSelectionTimeoutMS=8000,
+        connectTimeoutMS=8000,
+        socketTimeoutMS=8000,
     )
     db = client[db_name]
     db.command("ping")
@@ -722,27 +824,18 @@ def mongo():
     db["Wardrobe"].create_index([("customer_id", 1), ("part", 1), ("created_at", -1)])
     db["Outfits"].create_index([("customer_id", 1), ("created_at", -1)])
 
-    return db, fs
+    return client, db, fs
 
 
-@st.cache_data(show_spinner=False)
-def fs_get_bytes(uri: str, db_name: str, file_id_str: str) -> bytes:
-    client = MongoClient(
-        uri,
-        serverSelectionTimeoutMS=12000,
-        connectTimeoutMS=12000,
-        socketTimeoutMS=12000,
-    )
-    db = client[db_name]
-    fs = gridfs.GridFS(db)
+@st.cache_data(show_spinner=False, ttl=900, max_entries=64)
+def fs_get_bytes(file_id_str: str) -> bytes:
+    _client, _db, fs = mongo()
     data = fs.get(ObjectId(file_id_str)).read()
     return data
 
 
 def get_image_from_fs(fs, file_id_str: str) -> Image.Image:
-    uri = get_config_value("MONGO_URI", "")
-    db_name = get_config_value("MONGO_DB", "Wardrobe_db") or "Wardrobe_db"
-    data = fs_get_bytes(uri, db_name, file_id_str)
+    data = fs_get_bytes(file_id_str)
     return Image.open(io.BytesIO(data))
 
 
@@ -761,7 +854,7 @@ def save_garment(db, fs, customer_id: str, part: str, img_part: Image.Image, emb
     if dup is not None:
         raise ValueError("Duplicate garment image: this exact garment image already exists in your wardrobe.")
 
-    file_id = save_image_to_fs(fs, img_part, f"{customer_id}_{part}_{int(datetime.utcnow().timestamp())}.png")
+    file_id = save_image_to_fs(fs, img_part, f"{customer_id}_{part}_{int(now_utc().timestamp())}.png")
     vec = encode_vec(emb)
     doc = {
         "customer_id": customer_id,
@@ -770,20 +863,33 @@ def save_garment(db, fs, customer_id: str, part: str, img_part: Image.Image, emb
         "image_fs_id": file_id,
         "image_sha256": img_sha,
         "source": source,
-        "created_at": datetime.utcnow(),
+        "created_at": now_utc(),
         **vec,
     }
     res = db["Wardrobe"].insert_one(doc)
+    st.cache_data.clear()
     return str(res.inserted_id)
 
 
-def load_wardrobe(db, customer_id: str, part: str = None, tags_filter: list = None, limit: int = 400):
+@st.cache_data(show_spinner=False, ttl=180, max_entries=8)
+def load_wardrobe(customer_id: str, part: str = None, tags_filter: tuple = (), limit: int = 400):
+    _client, db, _fs = mongo()
     q = {"customer_id": customer_id}
     if part:
         q["part"] = part
     if tags_filter:
-        q["tags"] = {"$in": tags_filter}
-    return list(db["Wardrobe"].find(q).sort("created_at", -1).limit(limit))
+        q["tags"] = {"$in": list(tags_filter)}
+    projection = {
+        "_id": 1,
+        "part": 1,
+        "tags": 1,
+        "image_fs_id": 1,
+        "created_at": 1,
+        "emb_bin": 1,
+        "emb_dtype": 1,
+        "emb_dim": 1,
+    }
+    return list(db["Wardrobe"].find(q, projection).sort("created_at", -1).limit(int(limit)))
 
 
 def get_garment_by_id(db, garment_id):
@@ -833,6 +939,7 @@ def delete_garment_and_related_outfits(db, fs, customer_id: str, garment_doc: di
         except Exception:
             pass
 
+    st.cache_data.clear()
     return deleted_outfits
 
 
@@ -1014,7 +1121,7 @@ def pick_item_gallery(
     show_selected_preview: bool = True,
     hide_grid_when_selected: bool = False,
 ):
-    items = load_wardrobe(db, customer_id, part, tags_filter, limit=300)
+    items = load_wardrobe(customer_id, part, tuple(tags_filter or []), limit=300)
     if not items:
         st.warning(f"No {part} items (after filters).")
         return None
@@ -1115,17 +1222,19 @@ def save_outfit(db, customer_id: str, score: float, s_doc, p_doc, f_doc, tags: l
         "score": float(score),
         "tags": tags,
         "source": source,
-        "created_at": datetime.utcnow(),
+        "created_at": now_utc(),
     }
     db["Outfits"].insert_one(doc)
+    st.cache_data.clear()
     return True, None
 
 
 # =========================
 # APP START
 # =========================
+st.caption("Connecting to DB (cached)")
 try:
-    db, fs = mongo()
+    _mongo_client, db, fs = mongo()
 except Exception as e:
     if st.session_state.get("auth_user") is None:
         with st.sidebar:
@@ -1313,6 +1422,18 @@ with st.sidebar:
 
     top_k = st.slider("Top K", 5, 50, DEFAULT_TOPK, 1)
 
+    st.markdown("### Diagnostics")
+    debug_mem = st.checkbox("Debug memory", value=False, key="debug_memory")
+    if debug_mem:
+        mem_mb = get_memory_mb()
+        if mem_mb is not None:
+            st.caption(f"Process RSS max: {mem_mb:.1f} MB")
+
+    if st.button("Clear caches", use_container_width=True, key="clear_all_caches"):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
+
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "Add Outfit -> Wardrobe",
     "Match 1 Item",
@@ -1337,10 +1458,12 @@ with tab1:
 
         pending = st.session_state.get("pending_outfit_extract")
         if pending and pending.get("upload_sha") != upload_sha:
+            cleanup_pending_outfit_payload(pending)
             st.session_state.pending_outfit_extract = None
 
         if st.button("Extract parts + Save to Wardrobe", use_container_width=True):
             if upload_already_used(db, customer_id, upload_sha):
+                cleanup_pending_outfit_payload(st.session_state.get("pending_outfit_extract"))
                 st.session_state.pending_outfit_extract = None
                 st.error("Duplicate upload: this exact image was already uploaded (as outfit or garment).")
             else:
@@ -1356,6 +1479,7 @@ with tab1:
                     status.write("3) Cutting shirt/pants/shoes + computing embeddings.")
                     cut_imgs, embs, score_or_err = extract_parts_from_upload(str(tmp_path))
                     if cut_imgs is None:
+                        cleanup_pending_outfit_payload(st.session_state.get("pending_outfit_extract"))
                         st.session_state.pending_outfit_extract = None
                         status.update(label="❌ Failed", state="error", expanded=True)
                         st.error(score_or_err)
@@ -1383,13 +1507,21 @@ with tab1:
                                 similar_hits[part] = {"garment_id": str(sim_doc["_id"]), "similarity": float(sim)}
 
                         if similar_hits:
+                            token = make_pending_token("outfit")
+                            cut_img_paths = {}
+                            emb_paths = {}
+                            for part in PART_ORDER:
+                                cut_img_paths[part] = save_pending_image(token, part, cut_imgs[part])
+                                emb_paths[part] = save_pending_embedding(token, part, embs[part])
+
+                            cleanup_pending_outfit_payload(st.session_state.get("pending_outfit_extract"))
                             st.session_state.pending_outfit_extract = {
                                 "upload_sha": upload_sha,
                                 "upload_name": up.name,
                                 "score": score,
                                 "tags_final": tags_final,
-                                "cut_imgs_png": {part: image_to_png_bytes(cut_imgs[part]) for part in PART_ORDER},
-                                "embs": {part: embs[part].astype(np.float32).tolist() for part in PART_ORDER},
+                                "cut_img_paths": cut_img_paths,
+                                "emb_paths": emb_paths,
                                 "similar_hits": similar_hits,
                             }
                             st.warning(
@@ -1416,16 +1548,24 @@ with tab1:
 
                             st.session_state.pending_outfit_extract = None
                             status.update(label="✅ Done", state="complete", expanded=False)
+                    del cut_imgs
+                    del embs
 
         pending = st.session_state.get("pending_outfit_extract")
         if pending and pending.get("upload_sha") == upload_sha:
             st.markdown("#### Duplicate check review")
             st.caption("You can skip similar parts or explicitly confirm to save them anyway.")
 
-            pending_imgs = {
-                part: Image.open(io.BytesIO(pending["cut_imgs_png"][part])).convert("RGBA")
-                for part in PART_ORDER
-            }
+            pending_imgs = {}
+            for part in PART_ORDER:
+                img_path = (pending.get("cut_img_paths") or {}).get(part)
+                if img_path:
+                    pending_imgs[part] = load_rgba_from_path(img_path)
+            if len(pending_imgs) != len(PART_ORDER):
+                st.error("Pending review artifacts expired. Please run extraction again.")
+                cleanup_pending_outfit_payload(pending)
+                st.session_state.pending_outfit_extract = None
+                st.stop()
             trip = make_triptych(pending_imgs)
             bordered_image(
                 trip,
@@ -1467,8 +1607,8 @@ with tab1:
                         continue
 
                     try:
-                        img_part = Image.open(io.BytesIO(pending["cut_imgs_png"][part])).convert("RGBA")
-                        emb = np.array(pending["embs"][part], dtype=np.float32)
+                        img_part = load_rgba_from_path(pending["cut_img_paths"][part])
+                        emb = np.load(pending["emb_paths"][part], allow_pickle=False).astype(np.float32, copy=False)
                         _ = save_garment(db, fs, customer_id, part, img_part, emb, tags_final, source="outfit_upload")
                         saved_new += 1
                     except ValueError as e:
@@ -1486,6 +1626,7 @@ with tab1:
                     key = f"save_anyway_{part}"
                     if key in st.session_state:
                         del st.session_state[key]
+                cleanup_pending_outfit_payload(pending)
                 st.session_state.pending_outfit_extract = None
 
     st.divider()
@@ -1502,10 +1643,12 @@ with tab1:
 
         pending_single = st.session_state.get("pending_single_upload")
         if pending_single and pending_single.get("upload_sha") != upload_sha:
+            cleanup_pending_single_payload(pending_single)
             st.session_state.pending_single_upload = None
 
         if st.button("Save garment", use_container_width=True):
             if upload_already_used(db, customer_id, upload_sha):
+                cleanup_pending_single_payload(st.session_state.get("pending_single_upload"))
                 st.session_state.pending_single_upload = None
                 st.error("Duplicate upload: this exact image was already uploaded (as outfit or garment).")
             else:
@@ -1540,13 +1683,17 @@ with tab1:
                     status.write("4) Checking for near-duplicate garment by vector similarity.")
                     sim_doc, sim = find_most_similar_garment(db, customer_id, part_guess, emb)
                     if sim_doc is not None and sim >= GARMENT_SIMILARITY_WARN_THRESHOLD:
+                        token = make_pending_token("single")
+                        img_path = save_pending_image(token, "img", img_rgba)
+                        emb_path = save_pending_embedding(token, "emb", emb)
+                        cleanup_pending_single_payload(st.session_state.get("pending_single_upload"))
                         st.session_state.pending_single_upload = {
                             "upload_sha": upload_sha,
                             "upload_name": up2.name,
                             "part_guess": part_guess,
                             "tags_final": tags_final,
-                            "img_png": image_to_png_bytes(img_rgba),
-                            "emb": emb.astype(np.float32).tolist(),
+                            "img_path": img_path,
+                            "emb_path": emb_path,
                             "similar_hit": {"garment_id": str(sim_doc["_id"]), "similarity": float(sim)},
                         }
                         st.warning(
@@ -1558,6 +1705,7 @@ with tab1:
                         try:
                             _ = save_garment(db, fs, customer_id, part_guess, img_rgba, emb, tags_final, source="manual_auto")
                             remember_upload_sha(db, customer_id, upload_sha, kind="single_garment_upload", filename=up2.name)
+                            cleanup_pending_single_payload(st.session_state.get("pending_single_upload"))
                             st.session_state.pending_single_upload = None
                             st.success("Saved garment to Wardrobe.")
                             status.update(label="✅ Done", state="complete", expanded=False)
@@ -1590,8 +1738,8 @@ with tab1:
                 if st.button("Save reviewed garment", use_container_width=True, key="save_reviewed_single"):
                     if st.session_state.get("save_anyway_single", False):
                         try:
-                            img_rgba = Image.open(io.BytesIO(pending_single["img_png"])).convert("RGBA")
-                            emb = np.array(pending_single["emb"], dtype=np.float32)
+                            img_rgba = load_rgba_from_path(pending_single["img_path"])
+                            emb = np.load(pending_single["emb_path"], allow_pickle=False).astype(np.float32, copy=False)
                             _ = save_garment(
                                 db,
                                 fs,
@@ -1617,12 +1765,14 @@ with tab1:
 
                     if "save_anyway_single" in st.session_state:
                         del st.session_state["save_anyway_single"]
+                    cleanup_pending_single_payload(pending_single)
                     st.session_state.pending_single_upload = None
 
             with review_col2:
                 if st.button("Skip this garment", use_container_width=True, key="skip_reviewed_single"):
                     if "save_anyway_single" in st.session_state:
                         del st.session_state["save_anyway_single"]
+                    cleanup_pending_single_payload(pending_single)
                     st.session_state.pending_single_upload = None
                     st.info("Skipped similar garment.")
 
@@ -1668,9 +1818,9 @@ with tab2:
         if chosen and run_match:
             with fancy_status("🧠 Matching (sampling → scoring → ranking)") as status:
                 status.write("1) Loading wardrobe pools.")
-                shirts = load_wardrobe(db, customer_id, "shirt", tags_filter, limit=400)
-                pants = load_wardrobe(db, customer_id, "pants", tags_filter, limit=400)
-                shoes = load_wardrobe(db, customer_id, "shoes", tags_filter, limit=400)
+                shirts = load_wardrobe(customer_id, "shirt", tuple(tags_filter or []), limit=400)
+                pants = load_wardrobe(customer_id, "pants", tuple(tags_filter or []), limit=400)
+                shoes = load_wardrobe(customer_id, "shoes", tuple(tags_filter or []), limit=400)
 
                 if not shirts or not pants or not shoes:
                     st.error("Need at least 1 shirt + 1 pants + 1 shoes in wardrobe.")
@@ -1847,7 +1997,7 @@ with tab3:
                     if st.button(f"Find best {missing}", use_container_width=True):
                         with fancy_status("🧠 Completing outfit (sampling → scoring → ranking)") as status:
                             status.write("1) Loading candidates for the missing part.")
-                            pool = load_wardrobe(db, customer_id, missing, tags_filter, limit=400)
+                            pool = load_wardrobe(customer_id, missing, tuple(tags_filter or []), limit=400)
                             if not pool:
                                 st.error(f"No {missing} found.")
                                 status.update(label="❌ Failed", state="error", expanded=True)
@@ -1915,9 +2065,9 @@ with tab4:
     if st.button("Generate", use_container_width=True):
         with fancy_status("🧠 Recommending outfits (sampling → scoring → ranking)") as status:
             status.write("1) Loading wardrobe pools.")
-            shirts = load_wardrobe(db, customer_id, "shirt", tags_filter, limit=800)
-            pants = load_wardrobe(db, customer_id, "pants", tags_filter, limit=800)
-            shoes = load_wardrobe(db, customer_id, "shoes", tags_filter, limit=800)
+            shirts = load_wardrobe(customer_id, "shirt", tuple(tags_filter or []), limit=800)
+            pants = load_wardrobe(customer_id, "pants", tuple(tags_filter or []), limit=800)
+            shoes = load_wardrobe(customer_id, "shoes", tuple(tags_filter or []), limit=800)
 
             if not shirts or not pants or not shoes:
                 st.error("Need at least 1 shirt + 1 pants + 1 shoes in wardrobe.")
@@ -2053,3 +2203,7 @@ with tab5:
     st.caption("Garment deletion moved to a separate page for cleaner workflow.")
     legal_page_link("pages/05_Delete_Garments.py", "Open Delete Garments page")
     
+
+
+
+
