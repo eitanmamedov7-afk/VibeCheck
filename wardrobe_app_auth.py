@@ -5,6 +5,7 @@ import uuid
 import importlib.util
 import types
 import colorsys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 import base64
@@ -972,10 +973,12 @@ def delete_garment_and_related_outfits(db, fs, customer_id: str, garment_doc: di
 
     img_fs_id = garment_doc.get("image_fs_id")
     if img_fs_id:
-        try:
-            fs.delete(ObjectId(str(img_fs_id)))
-        except Exception:
-            pass
+        def _delete_fs_file_async():
+            try:
+                fs.delete(ObjectId(str(img_fs_id)))
+            except Exception:
+                pass
+        threading.Thread(target=_delete_fs_file_async, daemon=True).start()
 
     st.cache_data.clear()
     return deleted_outfits
@@ -1385,7 +1388,6 @@ if st.session_state.auth_user is None:
             ok, res = login_user(db, email, pw)
             if ok:
                 st.session_state.auth_user = res
-                st.success("Logged in")
                 st.rerun()
             else:
                 st.error(res)
@@ -2226,15 +2228,40 @@ with tab5:
                 continue
         filtered.append(o)
 
-    filtered = filtered[:50]
-
     if not filtered:
         st.info("No saved outfits matching your filters.")
     else:
-        st.write(f"Saved (filtered): {len(filtered)}")
+        total_filtered = len(filtered)
+        st.write(f"Saved (filtered): {total_filtered}")
+
+        page_col1, page_col2 = st.columns([1, 1])
+        with page_col1:
+            saved_page_size = st.selectbox(
+                "Saved outfits per page",
+                options=[6, 12, 24, 36],
+                index=0,
+                key="saved_outfits_page_size",
+            )
+        total_pages = max(1, (total_filtered + int(saved_page_size) - 1) // int(saved_page_size))
+        with page_col2:
+            saved_page = int(
+                st.number_input(
+                    "Saved outfits page",
+                    min_value=1,
+                    max_value=total_pages,
+                    value=1,
+                    step=1,
+                    key="saved_outfits_page_num",
+                )
+            )
+
+        start_idx = (saved_page - 1) * int(saved_page_size)
+        end_idx = min(total_filtered, start_idx + int(saved_page_size))
+        page_rows = filtered[start_idx:end_idx]
+        st.caption(f"Showing {start_idx + 1}-{end_idx} of {total_filtered}")
 
         garment_ids = set()
-        for o in filtered:
+        for o in page_rows:
             for gid in (o.get("shirt_id"), o.get("pants_id"), o.get("shoes_id")):
                 if gid:
                     garment_ids.add(str(gid))
@@ -2251,7 +2278,7 @@ with tab5:
                 for d in db["Wardrobe"].find({"_id": {"$in": oid_list}}, {"_id": 1, "image_fs_id": 1}):
                     wardrobe_docs[str(d["_id"])] = d
 
-        for o in filtered:
+        for o in page_rows:
             # delete button (per outfit doc)
             del_col, _ = st.columns([1, 6])
             with del_col:

@@ -1,6 +1,7 @@
 import base64
 import io
 import os
+import threading
 
 import gridfs
 from bson import ObjectId
@@ -174,10 +175,12 @@ def delete_garment_and_related_outfits(db, fs, customer_id: str, garment_doc: di
 
     img_fs_id = garment_doc.get("image_fs_id")
     if img_fs_id:
-        try:
-            fs.delete(ObjectId(str(img_fs_id)))
-        except Exception:
-            pass
+        def _delete_fs_file_async():
+            try:
+                fs.delete(ObjectId(str(img_fs_id)))
+            except Exception:
+                pass
+        threading.Thread(target=_delete_fs_file_async, daemon=True).start()
 
     st.cache_data.clear()
     return deleted_outfits
@@ -232,7 +235,7 @@ f1, f2 = st.columns([1, 1])
 with f1:
     part_filter = st.selectbox("Garment type", ["all", "shirt", "pants", "shoes"], key="delete_part_filter")
 with f2:
-    page_size = st.slider("Items shown", 10, 200, 40, 10, key="delete_limit")
+    page_size = st.slider("Items shown", 10, 200, 20, 10, key="delete_limit")
 
 total_count, _ = get_garments_page(customer_id, part_filter, 1, page_size)
 total_pages = max(1, (total_count + page_size - 1) // page_size)
