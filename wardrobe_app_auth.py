@@ -708,12 +708,12 @@ def mongo():
     fs = gridfs.GridFS(db)
 
     # indexes
-    # Cleanup legacy unique index that can incorrectly block all new registrations.
-    # Keep only email as unique in Customers.
+    # Cleanup legacy unique indexes that can incorrectly block new registrations.
+    # Keep only _id (default) and email as unique in Customers.
     try:
         for idx_name, idx_info in db["Customers"].index_information().items():
             keys = [k for k, _ in idx_info.get("key", [])]
-            if idx_info.get("unique") and keys == ["consent_text_hash"]:
+            if idx_info.get("unique") and keys not in (["_id"], ["email"]):
                 db["Customers"].drop_index(idx_name)
     except Exception:
         pass
@@ -885,6 +885,19 @@ def register_user(db, name: str, email: str, password: str, accepted_terms: bool
         key_value = details.get("keyValue") or {}
         if ("email" in key_pattern) or ("email" in key_value):
             return False, "Email already registered"
+        # Self-heal legacy wrong unique indexes (e.g. customer_id, consent_text_hash), then retry once.
+        try:
+            for idx_name, idx_info in db["Customers"].index_information().items():
+                keys = [k for k, _ in idx_info.get("key", [])]
+                if idx_info.get("unique") and keys not in (["_id"], ["email"]):
+                    db["Customers"].drop_index(idx_name)
+            db["Customers"].create_index([("email", 1)], unique=True)
+            db["Customers"].insert_one(doc)
+            return True, "Registered"
+        except DuplicateKeyError:
+            return False, "Email already registered"
+        except Exception as retry_e:
+            return False, f"Register error: {retry_e}"
         return False, f"Register error: duplicate key on {key_pattern or key_value}"
     except Exception as e:
         msg = str(e)
