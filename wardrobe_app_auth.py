@@ -93,7 +93,7 @@ PART_ORDER = ["shirt", "pants", "shoes"]
 
 DEFAULT_THRESHOLD = 0.80
 DEFAULT_TOPK = 20
-GARMENT_SIMILARITY_WARN_THRESHOLD = 0.96
+GARMENT_SIMILARITY_WARN_THRESHOLD = 0.90
 
 TAG_OPTIONS = ["sport", "casual", "formal", "work", "street", "summer", "winter"]
 
