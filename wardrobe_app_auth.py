@@ -17,7 +17,7 @@ except Exception:
     load_dotenv = None
 
 from pymongo import MongoClient
-from pymongo.errors import ServerSelectionTimeoutError
+from pymongo.errors import DuplicateKeyError, ServerSelectionTimeoutError
 import gridfs
 from bson.binary import Binary
 from bson import ObjectId
@@ -855,13 +855,17 @@ def register_user(db, name: str, email: str, password: str, accepted_terms: bool
         "privacy_version": PRIVACY_VERSION,
         "consent_text_hash": LEGAL_CONSENT_TEXT_HASH,
     }
+    # Fast pre-check to avoid misleading duplicate-key errors.
+    if db["Customers"].find_one({"email": email_norm}, {"_id": 1}) is not None:
+        return False, "Email already registered"
+
     try:
         db["Customers"].insert_one(doc)
         return True, "Registered"
+    except DuplicateKeyError:
+        return False, "Email already registered"
     except Exception as e:
         msg = str(e)
-        if "duplicate key" in msg.lower() or "E11000" in msg:
-            return False, "Email already registered"
         return False, f"Register error: {msg}"
 
 def login_user(db, email: str, password: str):
@@ -955,7 +959,16 @@ def extract_parts_from_upload(tmp_path: str):
 # =========================
 # IMAGE-BASED PICKERS (consistent beautiful display)
 # =========================
-def pick_item_gallery(db, fs, customer_id: str, part: str, tags_filter: list, key: str, page_size: int = 12):
+def pick_item_gallery(
+    db,
+    fs,
+    customer_id: str,
+    part: str,
+    tags_filter: list,
+    key: str,
+    page_size: int = 12,
+    show_selected_preview: bool = True,
+):
     items = load_wardrobe(db, customer_id, part, tags_filter, limit=300)
     if not items:
         st.warning(f"No {part} items (after filters).")
@@ -993,12 +1006,13 @@ def pick_item_gallery(db, fs, customer_id: str, part: str, tags_filter: list, ke
     if sel_id:
         chosen = next((x for x in items if str(x["_id"]) == sel_id), None)
         if chosen:
-            try:
-                img = get_image_from_fs(fs, chosen["image_fs_id"])
-                st.markdown("#### Selected")
-                bordered_image(img, caption=f"{part} selected", max_width=360)
-            except Exception:
-                pass
+            if show_selected_preview:
+                try:
+                    img = get_image_from_fs(fs, chosen["image_fs_id"])
+                    st.markdown("#### Selected")
+                    bordered_image(img, caption=f"{part} selected", max_width=360)
+                except Exception:
+                    pass
             return chosen
 
     return None
@@ -1013,6 +1027,7 @@ def score_combo_fast(s_doc, p_doc, f_doc, ipca, mlp, device: str):
 
 def show_outfit_card(fs, score: float, s_doc, p_doc, f_doc):
     col1, col2 = st.columns([2, 3])
+    border = score_to_hsl(score)
     with col1:
         try:
             shirt_img = get_image_from_fs(fs, s_doc["image_fs_id"])
@@ -1024,7 +1039,7 @@ def show_outfit_card(fs, score: float, s_doc, p_doc, f_doc):
             st.write("Image error:", e)
 
     with col2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
+        st.markdown(f'<div class="card" style="border-color:{border};">', unsafe_allow_html=True)
         traffic_bar(score)
         st.markdown("</div>", unsafe_allow_html=True)
 
@@ -1219,8 +1234,20 @@ with st.sidebar:
     render_legal_links_in_sidebar()
 
     st.markdown("### Account")
-    st.write("**User**")
+    st.write(f"**{customer_name}**")
     st.caption(customer_email)
+    if st.button("Logout", use_container_width=True):
+        st.session_state.auth_user = None
+        for k in list(st.session_state.keys()):
+            if (
+                k.startswith("pick_")
+                or k.startswith("m1_")
+                or k.startswith("m2_")
+                or k.startswith("match")
+                or k.startswith("save_anyway_")
+            ):
+                del st.session_state[k]
+        st.rerun()
 
     st.markdown("### Filters")
     tags_filter = st.multiselect("Filter by tags (optional)", options=TAG_OPTIONS, default=[])
@@ -1552,9 +1579,36 @@ with tab2:
     if start_part not in PART_ORDER:
         st.info("בחר סוג כדי להציג את הארון.")
     else:
-        chosen = pick_item_gallery(db, fs, customer_id, start_part, tags_filter, key=f"pick_1_{start_part}")
+        sel_key = f"pick_1_{start_part}"
+        chosen = pick_item_gallery(
+            db,
+            fs,
+            customer_id,
+            start_part,
+            tags_filter,
+            key=sel_key,
+            show_selected_preview=False,
+        )
 
-        if chosen and st.button("Find matches", use_container_width=True):
+        run_match = False
+        if chosen:
+            st.markdown("#### Selected garment")
+            try:
+                chosen_img = get_image_from_fs(fs, chosen["image_fs_id"])
+                bordered_image(chosen_img, caption=f"{start_part} selected", max_width=360)
+            except Exception:
+                pass
+
+            action_col, remove_col = st.columns([6, 1])
+            with action_col:
+                run_match = st.button("Get recommendations", use_container_width=True, key=f"{sel_key}_run")
+            with remove_col:
+                if st.button("X", use_container_width=True, key=f"{sel_key}_clear"):
+                    st.session_state.pop(sel_key, None)
+                    st.session_state.match1_results = []
+                    st.rerun()
+
+        if chosen and run_match:
             with fancy_status("🧠 Matching (sampling → scoring → ranking)") as status:
                 status.write("1) Loading wardrobe pools.")
                 shirts = load_wardrobe(db, customer_id, "shirt", tags_filter, limit=400)
