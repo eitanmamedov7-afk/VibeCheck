@@ -17,6 +17,7 @@ except Exception:
     load_dotenv = None
 
 from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError
 import gridfs
 from bson.binary import Binary
 from bson import ObjectId
@@ -689,7 +690,12 @@ def mongo():
     if not uri:
         raise RuntimeError("Missing MONGO_URI in Streamlit secrets or .env")
 
-    client = MongoClient(uri, serverSelectionTimeoutMS=8000)
+    client = MongoClient(
+        uri,
+        serverSelectionTimeoutMS=12000,
+        connectTimeoutMS=12000,
+        socketTimeoutMS=12000,
+    )
     db = client[db_name]
     db.command("ping")
 
@@ -705,7 +711,12 @@ def mongo():
 
 @st.cache_data(show_spinner=False)
 def fs_get_bytes(uri: str, db_name: str, file_id_str: str) -> bytes:
-    client = MongoClient(uri, serverSelectionTimeoutMS=8000)
+    client = MongoClient(
+        uri,
+        serverSelectionTimeoutMS=12000,
+        connectTimeoutMS=12000,
+        socketTimeoutMS=12000,
+    )
     db = client[db_name]
     fs = gridfs.GridFS(db)
     data = fs.get(ObjectId(file_id_str)).read()
@@ -1042,7 +1053,31 @@ def save_outfit(db, customer_id: str, score: float, s_doc, p_doc, f_doc, tags: l
 # =========================
 # APP START
 # =========================
-db, fs = mongo()
+try:
+    db, fs = mongo()
+except Exception as e:
+    if st.session_state.get("auth_user") is None:
+        with st.sidebar:
+            render_nav_links_in_sidebar(include_delete_garments=False)
+            render_legal_links_in_sidebar()
+
+    st.error("Database connection failed. Please check MongoDB configuration.")
+    st.caption(f"Error type: {type(e).__name__}")
+
+    if isinstance(e, ServerSelectionTimeoutError):
+        st.markdown(
+            """
+**MongoDB Atlas checklist**
+- Confirm Streamlit secrets include `MONGO_URI` and `MONGO_DB`.
+- In Atlas `Network Access`, allow Streamlit Cloud egress (or temporarily allow `0.0.0.0/0` for testing).
+- Verify the Atlas DB user/password in `MONGO_URI` are correct and URL-encoded.
+- Verify the Atlas cluster is running and reachable.
+"""
+        )
+    else:
+        st.caption(str(e))
+
+    st.stop()
 
 if st.session_state.get("auth_user") is None:
     with st.sidebar:

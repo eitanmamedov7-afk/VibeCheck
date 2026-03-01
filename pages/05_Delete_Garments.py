@@ -10,6 +10,7 @@ except Exception:
     load_dotenv = None
 from PIL import Image
 from pymongo import MongoClient
+from pymongo.errors import ServerSelectionTimeoutError
 import streamlit as st
 
 from brand_theme import inject_glass_css, render_footer, render_top_nav
@@ -50,7 +51,12 @@ def mongo():
     db_name = get_config_value("MONGO_DB", "Wardrobe_db") or "Wardrobe_db"
     if not uri:
         raise RuntimeError("Missing MONGO_URI in Streamlit secrets or .env")
-    client = MongoClient(uri, serverSelectionTimeoutMS=8000)
+    client = MongoClient(
+        uri,
+        serverSelectionTimeoutMS=12000,
+        connectTimeoutMS=12000,
+        socketTimeoutMS=12000,
+    )
     db = client[db_name]
     db.command("ping")
     fs = gridfs.GridFS(db)
@@ -59,7 +65,12 @@ def mongo():
 
 @st.cache_data(show_spinner=False)
 def fs_get_bytes(uri: str, db_name: str, file_id_str: str) -> bytes:
-    client = MongoClient(uri, serverSelectionTimeoutMS=8000)
+    client = MongoClient(
+        uri,
+        serverSelectionTimeoutMS=12000,
+        connectTimeoutMS=12000,
+        socketTimeoutMS=12000,
+    )
     db = client[db_name]
     fs = gridfs.GridFS(db)
     return fs.get(ObjectId(file_id_str)).read()
@@ -140,7 +151,20 @@ customer_id = str(auth_user["_id"])
 try:
     db, fs = mongo()
 except Exception as e:
-    st.error(f"MongoDB connection failed: {e}")
+    st.error("MongoDB connection failed.")
+    st.caption(f"Error type: {type(e).__name__}")
+    if isinstance(e, ServerSelectionTimeoutError):
+        st.markdown(
+            """
+**MongoDB Atlas checklist**
+- Confirm Streamlit secrets include `MONGO_URI` and `MONGO_DB`.
+- In Atlas `Network Access`, allow Streamlit Cloud egress (or temporarily allow `0.0.0.0/0` for testing).
+- Verify the Atlas DB user/password in `MONGO_URI` are correct and URL-encoded.
+- Verify the Atlas cluster is running and reachable.
+"""
+        )
+    else:
+        st.caption(str(e))
     st.stop()
 
 f1, f2 = st.columns([1, 1])
