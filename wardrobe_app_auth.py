@@ -29,7 +29,13 @@ import torch.nn as nn
 from torchvision import models, transforms
 import joblib
 
-from fashn_human_parser import FashnHumanParser, LABELS_TO_IDS
+try:
+    from fashn_human_parser import FashnHumanParser, LABELS_TO_IDS
+    PARSER_IMPORT_ERROR = None
+except Exception as e:
+    FashnHumanParser = None
+    LABELS_TO_IDS = {}
+    PARSER_IMPORT_ERROR = e
 
 
 # =========================
@@ -629,7 +635,7 @@ def load_models():
         raise RuntimeError(f"Missing MLP file: {MODEL_MLP_PATH}")
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    parser = FashnHumanParser()
+    parser = FashnHumanParser() if FashnHumanParser is not None else None
 
     resnet = models.resnet50(weights=models.ResNet50_Weights.DEFAULT)
     resnet.fc = nn.Identity()
@@ -904,6 +910,10 @@ def infer_tag_from_existing(db, customer_id: str, part: str, emb: np.ndarray, to
 
 
 def infer_part_from_parser(parser: FashnHumanParser, img_path: str):
+    if parser is None:
+        return None
+    if not LABELS_TO_IDS:
+        return None
     try:
         seg = parser.predict(img_path)
     except Exception:
@@ -936,6 +946,11 @@ def infer_part_by_similarity(db, customer_id: str, emb: np.ndarray):
 # =========================
 def extract_parts_from_upload(tmp_path: str):
     device, parser, resnet, preprocess, ipca, mlp = load_models()
+    if parser is None or not LABELS_TO_IDS:
+        err = "Human parser is unavailable in this deployment (OpenCV/cv2 failed to load)."
+        if PARSER_IMPORT_ERROR is not None:
+            err = f"{err} {PARSER_IMPORT_ERROR}"
+        return None, None, err
     seg = parser.predict(tmp_path)
     img = Image.open(tmp_path).convert("RGBA")
 
