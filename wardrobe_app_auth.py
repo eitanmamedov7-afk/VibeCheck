@@ -1,7 +1,7 @@
 ﻿import io
 import os
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 import base64
 import hashlib
@@ -708,6 +708,16 @@ def mongo():
     fs = gridfs.GridFS(db)
 
     # indexes
+    # Cleanup legacy unique index that can incorrectly block all new registrations.
+    # Keep only email as unique in Customers.
+    try:
+        for idx_name, idx_info in db["Customers"].index_information().items():
+            keys = [k for k, _ in idx_info.get("key", [])]
+            if idx_info.get("unique") and keys == ["consent_text_hash"]:
+                db["Customers"].drop_index(idx_name)
+    except Exception:
+        pass
+
     db["Customers"].create_index([("email", 1)], unique=True)
     db["Wardrobe"].create_index([("customer_id", 1), ("part", 1), ("created_at", -1)])
     db["Outfits"].create_index([("customer_id", 1), ("created_at", -1)])
@@ -854,9 +864,9 @@ def register_user(db, name: str, email: str, password: str, accepted_terms: bool
         "name": name.strip(),
         "email": email_norm,
         "password_hash": hash_password(password),
-        "created_at": datetime.utcnow(),
+        "created_at": datetime.now(timezone.utc),
         "terms_accepted": True,
-        "terms_accepted_at": datetime.utcnow(),
+        "terms_accepted_at": datetime.now(timezone.utc),
         "terms_version": TERMS_VERSION,
         "privacy_version": PRIVACY_VERSION,
         "consent_text_hash": LEGAL_CONSENT_TEXT_HASH,
@@ -868,8 +878,14 @@ def register_user(db, name: str, email: str, password: str, accepted_terms: bool
     try:
         db["Customers"].insert_one(doc)
         return True, "Registered"
-    except DuplicateKeyError:
-        return False, "Email already registered"
+    except DuplicateKeyError as e:
+        # Only return "email already registered" when the duplicate is actually on email.
+        details = getattr(e, "details", None) or {}
+        key_pattern = details.get("keyPattern") or {}
+        key_value = details.get("keyValue") or {}
+        if ("email" in key_pattern) or ("email" in key_value):
+            return False, "Email already registered"
+        return False, f"Register error: duplicate key on {key_pattern or key_value}"
     except Exception as e:
         msg = str(e)
         return False, f"Register error: {msg}"
@@ -983,6 +999,7 @@ def pick_item_gallery(
     key: str,
     page_size: int = 12,
     show_selected_preview: bool = True,
+    hide_grid_when_selected: bool = False,
 ):
     items = load_wardrobe(db, customer_id, part, tags_filter, limit=300)
     if not items:
@@ -1000,6 +1017,17 @@ def pick_item_gallery(
     view = items[start:end]
 
     sel_id = st.session_state.get(key, "")
+    if hide_grid_when_selected and sel_id:
+        chosen = next((x for x in items if str(x["_id"]) == sel_id), None)
+        if chosen:
+            if show_selected_preview:
+                try:
+                    img = get_image_from_fs(fs, chosen["image_fs_id"])
+                    st.markdown("#### Selected")
+                    bordered_image(img, caption=f"{part} selected", max_width=360)
+                except Exception:
+                    pass
+            return chosen
 
     cols = st.columns(4)
     for i, it in enumerate(view):
@@ -1603,6 +1631,7 @@ with tab2:
             tags_filter,
             key=sel_key,
             show_selected_preview=False,
+            hide_grid_when_selected=True,
         )
 
         run_match = False
