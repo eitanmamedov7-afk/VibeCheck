@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import hashlib
@@ -33,8 +33,8 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 MODEL_PCA_PATH = ROOT_DIR / "work" / "model_out" / "pca_v2.joblib"
 MODEL_MLP_PATH = ROOT_DIR / "work" / "model_out" / "mlp.pt"
 RUNTIME_TMP_ROOT = Path(os.environ.get("TMPDIR", tempfile.gettempdir()))
-PENDING_DIR = RUNTIME_TMP_ROOT / "vibecheck_pending"
-TMP_DIR = RUNTIME_TMP_ROOT / "vibecheck_tmp"
+PENDING_DIR = RUNTIME_TMP_ROOT / "looklux_pending"
+TMP_DIR = RUNTIME_TMP_ROOT / "looklux_tmp"
 
 PARTS = {"shirt": "top", "pants": "pants", "shoes": "feet"}
 PART_ORDER = ["shirt", "pants", "shoes"]
@@ -43,7 +43,7 @@ GARMENT_SIMILARITY_WARN_THRESHOLD = 0.70
 DISPLAY_BG_RGB = (18, 18, 18)
 TERMS_VERSION = "2026-02-28"
 PRIVACY_VERSION = "2026-02-28"
-LEGAL_CONSENT_TEXT = "I agree to the VibeCheck Terms of Use and Privacy Policy."
+LEGAL_CONSENT_TEXT = "I agree to the LookLux Terms of Use and Privacy Policy."
 LEGAL_CONSENT_TEXT_HASH = hashlib.sha256(
     f"{LEGAL_CONSENT_TEXT}|terms:{TERMS_VERSION}|privacy:{PRIVACY_VERSION}".encode("utf-8")
 ).hexdigest()

@@ -1,4 +1,4 @@
-﻿import io
+import io
 import os
 import random
 import uuid
@@ -70,12 +70,12 @@ try:
     # Prefer the local cv2-free parser module from this repository.
     FashnHumanParser, LABELS_TO_IDS = _import_local_human_parser()
     PARSER_IMPORT_ERROR = None
-    print("[VibeCheck] Using local fashn_human_parser module.")
+    print("[LookLux] Using local fashn_human_parser module.")
 except Exception as local_e:
     try:
         from fashn_human_parser import FashnHumanParser, LABELS_TO_IDS
         PARSER_IMPORT_ERROR = None
-        print("[VibeCheck] Using installed fashn_human_parser package.")
+        print("[LookLux] Using installed fashn_human_parser package.")
     except Exception as pkg_e:
         FashnHumanParser = None
         LABELS_TO_IDS = {}
@@ -100,7 +100,7 @@ TAG_OPTIONS = ["sport", "casual", "formal", "work", "street", "summer", "winter"
 # display background to avoid any "white" in cutouts
 DISPLAY_BG_RGB = (18, 18, 18)
 
-APP_BRAND = "VibeCheck"
+APP_BRAND = "LookLux"
 LEGAL_CONTACT_EMAIL = "eitanmamedov7@gmail.com"
 POLICY_VERSION = "2026-02-28"
 TERMS_VERSION = POLICY_VERSION
@@ -208,7 +208,7 @@ def cleanup_pending_single_payload(payload: dict | None):
 # =========================
 # UI STYLE
 # =========================
-st.set_page_config(page_title="VibeCheck Platform", layout="wide")
+st.set_page_config(page_title="LookLux Platform", layout="wide")
 st.markdown(
     """
 <style>
@@ -790,7 +790,7 @@ def load_models():
     if not Path(MODEL_MLP_PATH).exists():
         raise RuntimeError(f"Missing MLP file: {MODEL_MLP_PATH}")
 
-    print("[VibeCheck] Loading ML assets into cache (CPU)")
+    print("[LookLux] Loading ML assets into cache (CPU)")
     device = "cpu"
     parser = FashnHumanParser(device="cpu") if FashnHumanParser is not None else None
 
@@ -853,7 +853,7 @@ def mongo():
     if not uri:
         raise RuntimeError("Missing MONGO_URI in Streamlit secrets or .env")
 
-    print("[VibeCheck] Connecting Mongo client (cached)")
+    print("[LookLux] Connecting Mongo client (cached)")
     client = MongoClient(
         uri,
         serverSelectionTimeoutMS=8000,
@@ -1331,7 +1331,7 @@ if st.session_state.auth_user is None:
         """
 <div class="landing-shell">
   <div class="landing-nav glass-panel">
-    <div class="brand-pill">VibeCheck Access</div>
+    <div class="brand-pill">LookLux Access</div>
     <div class="nav-links">
       <a href="#auth-cta">Get Access</a>
       <a href="#auth-cta">Login</a>

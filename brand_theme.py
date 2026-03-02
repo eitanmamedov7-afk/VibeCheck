@@ -1,6 +1,6 @@
-﻿import streamlit as st
+import streamlit as st
 
-BRAND_NAME = "VibeCheck"
+BRAND_NAME = "LookLux"
 
 _BASE_CSS = """
 :root {
@@ -296,7 +296,7 @@ def render_footer():
     st.markdown(
         """
 <div class="page-shell card site-footer">
-  <div>VibeCheck</div>
+  <div>LookLux</div>
   <div>Visual intelligence platform.</div>
 </div>
 """,

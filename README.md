@@ -1,4 +1,4 @@
-﻿# VibeCheck (Vercel Native)
+# LookLux (Vercel Native)
 
 This repository now runs as a Vercel-native Python web app (Flask) without Streamlit runtime.
 

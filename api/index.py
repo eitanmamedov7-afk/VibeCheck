@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import io
 import math
@@ -15,7 +15,7 @@ try:
 except Exception:  # pragma: no cover
     import core  # type: ignore
 
-BRAND = "VibeCheck"
+BRAND = "LookLux"
 CONTACT_EMAIL = "eitanmamedov7@gmail.com"
 POLICY_DATE = "2026-02-28"
 

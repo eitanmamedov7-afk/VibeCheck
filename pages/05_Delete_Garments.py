@@ -16,7 +16,7 @@ import streamlit as st
 
 from brand_theme import inject_glass_css, render_footer, render_top_nav
 
-BRAND = "VibeCheck"
+BRAND = "LookLux"
 
 st.set_page_config(page_title=f"{BRAND} | Delete Garments", layout="wide")
 inject_glass_css(hide_sidebar=True)
@@ -53,7 +53,7 @@ def mongo():
     if not uri:
         raise RuntimeError("Missing MONGO_URI in Streamlit secrets or .env")
 
-    print("[VibeCheck] Connecting Mongo client for Delete Garments page (cached)")
+    print("[LookLux] Connecting Mongo client for Delete Garments page (cached)")
     client = MongoClient(
         uri,
         serverSelectionTimeoutMS=8000,

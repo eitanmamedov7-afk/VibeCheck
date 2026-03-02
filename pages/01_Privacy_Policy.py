@@ -1,8 +1,8 @@
-﻿import streamlit as st
+import streamlit as st
 
 from brand_theme import inject_glass_css, render_footer, render_top_nav
 
-BRAND = "VibeCheck"
+BRAND = "LookLux"
 CONTACT_EMAIL = "eitanmamedov7@gmail.com"
 LAST_UPDATED = "2026-02-28"
 
