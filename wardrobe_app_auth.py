@@ -585,13 +585,17 @@ def cutout_part_rgba(img_rgba: Image.Image, seg: np.ndarray, label_name: str, cr
     if mask.sum() == 0:
         return None
 
+    rgba = np.array(img_rgba.convert("RGBA"), dtype=np.uint8)
+    alpha = rgba[:, :, 3]
+    rgba[:, :, 3] = np.where(mask > 0, alpha, 0).astype(np.uint8)
+    masked = Image.fromarray(rgba, mode="RGBA")
+
     ys, xs = np.where(mask > 0)
     y0, y1 = ys.min(), ys.max() + 1
     x0, x1 = xs.min(), xs.max() + 1
     if crop:
-        # Preserve the original background by cropping the original image rectangle.
-        return img_rgba.crop((x0, y0, x1, y1))
-    return img_rgba.copy()
+        return masked.crop((x0, y0, x1, y1))
+    return masked
 
 
 def legal_page_link(path: str, label: str):
@@ -1714,6 +1718,7 @@ with tab1:
                     status.write("3) Computing garment embedding.")
                     emb_source_img = img_rgba
                     emb = emb_full
+                    used_cropped_region = False
                     if parser is not None and LABELS_TO_IDS and part_guess in PARTS:
                         try:
                             seg_single = parser.predict(str(tmp_path))
@@ -1721,8 +1726,13 @@ with tab1:
                             if cut is not None:
                                 emb_source_img = cut
                                 emb = emb_from_pil(emb_source_img, device, resnet, preprocess)
+                                used_cropped_region = True
                         except Exception:
                             pass
+                    if used_cropped_region:
+                        st.caption("Using cropped garment region for embedding and save.")
+                    else:
+                        st.caption("Using full image for embedding (crop not available).")
 
                     tags_final = list(tags2)
                     if auto_style2 and not tags_final:
