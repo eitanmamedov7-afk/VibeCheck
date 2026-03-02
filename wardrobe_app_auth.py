@@ -598,6 +598,19 @@ def cutout_part_rgba(img_rgba: Image.Image, seg: np.ndarray, label_name: str, cr
     return masked
 
 
+def cutout_part_bbox_rgba(img_rgba: Image.Image, seg: np.ndarray, label_name: str, crop=True):
+    label_id = LABELS_TO_IDS[label_name]
+    mask = (seg == label_id).astype(np.uint8) * 255
+    if mask.sum() == 0:
+        return None
+    ys, xs = np.where(mask > 0)
+    y0, y1 = ys.min(), ys.max() + 1
+    x0, x1 = xs.min(), xs.max() + 1
+    if crop:
+        return img_rgba.crop((x0, y0, x1, y1)).convert("RGBA")
+    return img_rgba.convert("RGBA")
+
+
 def legal_page_link(path: str, label: str):
     if hasattr(st, "page_link"):
         st.page_link(path, label=label)
@@ -1717,20 +1730,24 @@ with tab1:
 
                     status.write("3) Computing garment embedding.")
                     emb_source_img = img_rgba
+                    save_source_img = img_rgba
                     emb = emb_full
                     used_cropped_region = False
                     if parser is not None and LABELS_TO_IDS and part_guess in PARTS:
                         try:
                             seg_single = parser.predict(str(tmp_path))
-                            cut = cutout_part_rgba(img_rgba, seg_single, PARTS[part_guess], crop=True)
-                            if cut is not None:
-                                emb_source_img = cut
+                            cut_masked = cutout_part_rgba(img_rgba, seg_single, PARTS[part_guess], crop=True)
+                            cut_bbox = cutout_part_bbox_rgba(img_rgba, seg_single, PARTS[part_guess], crop=True)
+                            if cut_masked is not None:
+                                emb_source_img = cut_masked
                                 emb = emb_from_pil(emb_source_img, device, resnet, preprocess)
                                 used_cropped_region = True
+                            if cut_bbox is not None:
+                                save_source_img = cut_bbox
                         except Exception:
                             pass
                     if used_cropped_region:
-                        st.caption("Using cropped garment region for embedding and save.")
+                        st.caption("Using cropped garment for embedding. Saved image keeps cropped background.")
                     else:
                         st.caption("Using full image for embedding (crop not available).")
 
@@ -1745,7 +1762,7 @@ with tab1:
                     sim_doc, sim = find_most_similar_garment(db, customer_id, part_guess, emb)
                     if sim_doc is not None and sim >= GARMENT_SIMILARITY_WARN_THRESHOLD:
                         token = make_pending_token("single")
-                        img_path = save_pending_image(token, "img", emb_source_img)
+                        img_path = save_pending_image(token, "img", save_source_img)
                         emb_path = save_pending_embedding(token, "emb", emb)
                         cleanup_pending_single_payload(st.session_state.get("pending_single_upload"))
                         st.session_state.pending_single_upload = {
@@ -1769,7 +1786,7 @@ with tab1:
                                 fs,
                                 customer_id,
                                 part_guess,
-                                emb_source_img,
+                                save_source_img,
                                 emb,
                                 tags_final,
                                 source="manual_auto",
