@@ -5,11 +5,6 @@
     "LOOKLUX_INFERENCE_URL": "https://mcp-server-hebrew.onrender.com,https://looklux.onrender.com",
     "LOOKLUX_ENABLE_DEFAULT_INFERENCE_URL": "1"
   },
-  "functions": {
-    "api/index.py": {
-      "includeFiles": "work/model_out/**"
-    }
-  },
   "routes": [
     { "src": "/(.*)", "dest": "/api/index.py" }
   ]
